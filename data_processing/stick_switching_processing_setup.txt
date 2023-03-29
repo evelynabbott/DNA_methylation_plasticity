@@ -1,0 +1,148 @@
+#stick_switch_processing_steps.txt
+
+######################################
+###### DOWNLOAD AND BACKUP DATA ######
+######################################
+
+#list your projects
+bs list projects
+
+#download project data
+bs download project -i 160609449 -o JA20093
+
+
+#compress for backup
+tar -zcvf JA20093.tar.gz JA20093/
+
+
+#organize fastqs into single directory
+mkdir fastqs 
+cd fastqs
+>make_moves
+for dir in $(ls -d/ ../JA20093/*)
+do echo "echo \"moving files from ${dir}...\"
+mv $dir/*.gz ." >> make_moves
+done
+
+
+#check raw file counts
+ls mdRAD-*.fastq.gz | wc -l
+	#192 single end read files -- matches with expected 96 samples across two lanes
+
+ls tagSeq-*.fastq.gz | wc -l
+	#192 single end files -- matches with expected 96 samples across two lanes
+
+ls *JP*.gz | wc -l
+	#14 -- matches with 7 bonus samples JP added in to check barcoding issues
+
+#looks good
+
+#decompress
+>decomp
+for file in *.fastq.gz
+do echo "gunzip $file" >> decomp
+done
+
+launcher_creator.py -n decomp -j decomp -q development -N 1 -w 48 -a $allo -t 00:30:00
+
+#concatenate
+>do_concat
+for file in *L001_R1_001.fastq
+do echo "cat $file ${file/_L001_R1_001.fastq/}_L002_R1_001.fastq > ${file/_L001_R1_001.fastq/}.fastq" >>do_concat
+done
+
+launcher_creator.py -n do_concat -j do_concat -q development -N 1 -w 48 -a $allo -t 00:20:00
+
+
+#note the raw original files (you don't want to use these) for this project are now backed up here:
+/stornext/ranch_01/ranch/users/02260/grovesd/raw_sequence_reads/JA20093_ORIGINAL_W_ERRORS.tar.gz
+
+#the good renamed files are here:
+
+
+#######################################
+############## RUN FASTQ ##############
+#######################################
+
+#SET UP DIRECTORY WITH SUBSETS FOR QUICK TESTS
+
+NTEST=400000
+mkdir testRun
+for file in *5.fastq
+do head -n $NTEST $file > testRun/${file}
+done
+
+
+#Run FastQC on subsets
+
+module load fastqc
+mkdir Fastqc_Restults_raw/
+> runFQC
+for file in *.fastq
+do echo "fastqc -o Fastqc_Restults_raw/ -f fastq $file" >> runFQC
+done
+
+launcher_creator.py -n runFQC -j runFQC -q normal -N 1 -w 48 -a $allo -e $email -t 05:00:00
+sbatch runFQC.slurm
+
+######################################
+########## REFERENCE GENOME ##########
+######################################
+
+#set up window boundary files
+
+#------- MAKING WINDOWS:
+#REPEAT FOR EACH REFERENCE
+GFF="Spis.revised.gff"
+GENOME="/work/05410/eabbott/lonestar/amil.symb/Amil.symb.cat.genome.fasta"
+#generate gene windows
+gff_to_bed4.py -gff $GFF -feature gene -IDstring ID -o geneBoundaries.bed
+
+#generate exon windows
+gff_to_bed4.py -gff $GFF -feature CDS -IDstring ID -o cdsBoundaries.bed
+
+#generate promoter windows
+gff_to_promoter_bed.py -gff $GFF -bp 1000 -IDstring ID -o promoterBoundaries.bed
+
+#generate for tss windows
+gff_to_tssWindow_bed.py -gff $GFF -bp 250 -IDstring ID -o tssBoundaries.bed
+
+#generate 1Kb windows
+module load bedtools
+fasta_sequence_characters.py -fa $GENOME > chrLengths.txt
+bedtools makewindows -g chrLengths.txt -w 1000 | awk 'BEGIN{OFS="\t"}{print $0,$1"-"$2"-"$3}' > windowBoundaries_1kb.bed
+
+#generate 500 bp windows
+module load bedtools
+fasta_sequence_characters.py -fa $GENOME > chrLengths.txt
+bedtools makewindows -g chrLengths.txt -w 500 | awk 'BEGIN{OFS="\t"}{print $0,$1"-"$2"-"$3}' > windowBoundaries_500bp.bed
+
+#1Kb windows around genes
+windows_around_genes_from_gff.R --i $GFF --o 1kb_around_genes.bed
+
+#------------------------
+
+#------- MAKE A CALLABLE REFERENCE GENOME FILE:
+#this is not required, but a convenient way to keep all the reference genome files associated and callable from scratch
+cdw
+mkdir my_reference_genomes
+#will need to set these paths to match where your A.millepora reference genome is
+
+GENOME_FOLDER=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00
+echo "\
+GENOME_FOLDER=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00
+GENOME_PATH=${GENOME_FOLDER}/Amil.v2.00.chrs.fasta
+GFF_PATH=${GENOME_FOLDER}/Amil.coding.gff3
+GENE_ID=ID
+exonWindowFile=${GENOME_FOLDER}/cdsBoundaries.bed
+geneWindowFile=${GENOME_FOLDER}/geneBoundaries.bed
+promoterWindowFile=${GENOME_FOLDER}/promoterBoundaries.bed
+tssWindowFile=${GENOME_FOLDER}/tssBoundaries.bed
+window1KbFile=${GENOME_FOLDER}/windowBoundaries_1kb.bed
+window500bpFile=${GENOME_FOLDER}/windowBoundaries_500bp.bed
+aroundGeneWindowFile=${GENOME_FOLDER}/1kb_around_genes.bed" > /work/02260/grovesd/lonestar/my_reference_genomes/amilleporaReference.sh
+
+
+
+
+

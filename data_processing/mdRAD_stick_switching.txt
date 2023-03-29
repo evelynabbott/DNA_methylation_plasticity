@@ -1,0 +1,233 @@
+
+
+############################
+######## PREP READS ########
+############################
+
+#FILTER READS FOR CORRECT STARTING SEQUENCES AND PCR DUPLICATES
+#note this script should work for both single end and paired end reads
+#for single end mode simply leave off the -r2 argument
+
+>checkReads
+for file in mdRAD*.fastq
+do R1=$file
+ echo "filter_methylGBS_reads.py -r1 $R1 -o1 ${R1/.fastq/}_filt0.fastq" >> checkReads
+done
+
+#gather results
+oFile=checkReads.o2651091
+grep "were duplicates" $oFile | grep "R1.fq" | awk '{split($5, a, "("); split(a[2], b, "%"); print b[1]}' > R1_duplication_rates.txt
+grep "were duplicates" $oFile | grep "R2.fq" | awk '{split($5, a, "("); split(a[2], b, "%"); print b[1]}' > R2_duplication_rates.txt
+grep "were duplicates based on both R1 and R2 read" $oFile | awk '{split($5, a, "("); split(a[2], b, "%"); print b[1]}' > paired_duplication_rates.txt
+grep "correct start for both pe reads" $oFile | awk '{split($5, a, "("); split(a[2], b, "%"); print b[1]}' > correct_start_rates.txt
+grep "had correct shape and were unique" $oFile | awk '{split($5, a, "("); split(a[2], b, "%"); print b[1]}' > passing_filter_methylGBS_rates.txt
+
+
+
+#Trim away the first six basepairs and any adapter sequences
+>trimse
+for file in *_filt0.fastq
+do echo "cutadapt \
+-u 6 \
+-a GATCGGAAGAGCA \
+-a AGATCGGAAGAGC \
+--minimum-length 20 \
+-q 20 \
+-o ${file/_filt0.fastq/}.trim \
+$file > ${file/_filt0.fastq}_trimlog.txt" >> trimse
+done
+
+launcher_creator.py -n trimse -j trimse -q normal -N 2 -w 48 -a $allo -e $email -t 04:00:00
+
+
+#################################
+############ MAPPING ############
+#################################
+
+source /work/02260/grovesd/stampede2/myReferences/amilleporaReference.sh
+
+#build mapping commands
+module load bowtie
+>mapse
+for file in *.trim
+do echo "\
+bowtie2 -x $GENOME_PATH -U ${file} --local -p 6 -S ${file/.trim/}.sam">> mapse
+done
+
+#note wayness more than 6 is no good for this
+launcher_creator.py -n mapse -j mapse -q normal -N 12 -w 8 -a $allo -e $email -t 12:00:00
+
+
+#sort and convert to bams
+module load samtools
+>sortConv
+for file in *.sam
+do echo "samtools sort -o ${file/.sam/}.bam $file && samtools index ${file/.sam/}.bam" >> sortConv
+done
+
+
+#######################################
+######### GET WINDOW COUNTS ###########
+#######################################
+
+#window generation is shown in picoMethyl_data_processing_pipeline.txt
+#window files to use here are:
+geneWindowFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/geneBoundaries.bed
+exonWindowFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/cdsBoundaries.bed
+promoterWindowFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/promoterBoundaries.bed
+tssWindowFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/tssBoundaries.bed
+window1KbFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/windowBoundaries_1kb.bed
+
+
+#run bedtools
+module load bedtools
+echo "bedtools multicov -bams *.bam -bed $geneWindowFile > mr_gene_counts.tsv0
+bedtools multicov -bams *.bam -bed $exonWindowFile > mr_exon_counts.tsv0
+bedtools multicov -bams *.bam -bed $promoterWindowFile > mr_promoter_counts.tsv0
+bedtools multicov -bams *.bam -bed $tssWindowFile > mr_tss_counts.tsv0
+bedtools multicov -bams *.bam -bed $window1KbFile > mr_1kbWindow_counts.tsv0" > runBedtools
+
+
+module load bedtools
+launcher_creator.py -n runBedtools -j runBedtools -q normal -N 1 -w 5 -a $allo -e $email -t 08:00:00
+
+
+#format output
+samples=`ls *.bam | sed 's/.bam//' | tr "\n" "\t"`
+echo -e "chr\tstart\tend\tname\t$samples" > header.txt
+
+for file in *_counts.tsv0
+do echo "cat header.txt $file > ${file/_counts.tsv0/}_multicov.tsv"
+done
+
+
+#----- split by chromosome for parallelizing small windows -----#
+window1KbFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/windowBoundaries_1kb.bed
+window500bpFile=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/windowBoundaries_500bp.bed
+
+
+WINDOW_FILE=/work/02260/grovesd/lonestar/Amil_Zach_Fullers_v2.00/geneBoundaries.bed
+NAME=geneBoundaries.bed
+
+#get chrs
+cut -f 1 $WINDOW_FILE | sort | uniq | grep "^chr" > chrs.txt
+
+
+#build chr beds
+while read chr
+do echo "${chr}..."
+grep -w "^${chr}" $WINDOW_FILE > ${chr}_sub_${NAME}
+done < chrs.txt
+grep -v "^chr" $WINDOW_FILE > chrUn_sub_${NAME}
+
+#run multicov for each
+>paraMulticov
+for file in *_sub_${NAME}
+do echo "bedtools multicov -bams *.bam -bed $file > mr_${file}_counts.tsv0" >>paraMulticov
+done
+
+launcher_creator.py -n paraMulticov -j paraMulticov -q normal -N 1 -w 15 -a $allo -e $email -t 10:00:00
+sbatch paraMulticov.slurm
+
+
+#returns 15 *counts.tsv0 files. One for each chromosome and 1 for scaffolds
+#add headers to each
+samples=`ls *.bam | sed 's/.bam//' | tr "\n" "\t"`
+echo -e "chr\tstart\tend\tname\t$samples" > ${NAME}.tsv
+cat *_sub_${NAME}*tsv0  > ${NAME}.tsv
+
+
+
+#Optionally run DESeq on them on TACC
+for file in *bed_multicov.tsv
+do echo "methylRAD_differences_TACC.R --i $file --pCut 0.2 --o ${file/.bed_multicov.tsv/} &"
+done
+
+#check results
+ls *500bp_windows_genotype_response.tsv | wc -l
+ls *500bp_windows_tissue_response.tsv | wc -l
+
+
+#ASSEMBLE INTO FINAL TSV FILES
+#genotype
+head -n 1 mr_chrUn_500bp_windows_genotype_response.tsv > mr_500bp_window_genotype_allResponse.tsv
+for file in *500bp_windows_genotype_response.tsv
+do echo "${file}..."
+ tail -n +2 $file >> mr_500bp_window_genotype_allResponse.tsv
+done
+
+#check
+wc -l *_windows_genotype_response.tsv
+wc -l mr_500bp_window_genotype_allResponse.tsv
+
+
+#tissue
+head -n 1 mr_chrUn_500bp_windows_tissue_response.tsv > mr_500bp_window_tissue_allResponse.tsv
+for file in *_windows_tissue_response.tsv
+do tail -n +2 $file >> mr_500bp_window_tissue_allResponse.tsv
+done
+
+#check
+wc -l *_windows_tissue_response.tsv
+wc -l mr_500bp_window_tissue_allResponse.tsv
+
+#send to PC here: benchmarking_coral_methylation/mbdSeq/datasets/
+#incorporate into results list with process_methylRAD.R
+
+
+
+##################################
+######### PIPELINE COUNTS ########
+##################################
+
+wc -l *.fastq |\
+ awk '{split($2, a, ".fastq")
+ print a[1]"\t"$1/4"\trawCounts"}' |\
+ grep -v total > raw_read_counts.tsv &
+
+
+
+#GET POST CHECK READ COUNTS
+wc -l *filt0.fastq |\
+ awk '{split($2, a, "_filt0.fastq")
+ print a[1]"\t"$1/4"\tstartChecked"}' |\
+ grep -v total > startCheck_read_counts.tsv &
+
+
+
+#GET POST TRIMMING READ COUNT
+wc -l *.trim |\
+ awk '{split($2, a, ".trim")
+ print a[1]"\t"$1/4"\ttrimmedCounts"}' |\
+ grep -v total > trimmed_read_counts.tsv &
+
+
+#run flagstat
+module load samtools
+>flagstats
+for file in *.bam
+do echo "samtools flagstat $file > ${file/.bam/}_flagstats.txt" >>flagstats
+done
+
+
+#format total reads
+>prededup_mapped_count.tsv
+for file in  *flagstats.txt
+do pp=$(grep "mapped" $file | head -n 1)
+ echo -e "$file\t$pp" |\
+ awk '{split($1, a, "_prededup_flagstats.txt")
+ print a[1]"\t"$2"\tpredupMapped"}' >> prededup_mapped_count.tsv
+ done
+
+
+#assemble pipeline counts
+cat raw_read_counts.tsv startCheck_read_counts.tsv trimmed_read_counts.tsv prededup_mapped_count.tsv > pipelineCounts.tsv
+
+
+
+
+
+
+
+
+

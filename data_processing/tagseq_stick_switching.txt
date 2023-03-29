@@ -1,0 +1,142 @@
+#TagSeq_stick_switching.txt
+
+######################################
+############## TRIMMING ##############
+######################################
+
+>trimse
+for file in *.fastq
+do echo "cutadapt \
+-a GATCGGAAGAGCA \
+-a AGATCGGAAGAGC \
+--minimum-length 20 \
+-q 20 \
+-o ${file/.fastq/}.trim \
+$file > ${file/.fastq}_trimlog.txt" >> trimse
+done
+
+launcher_creator.py -n trimse -j trimse -q normal -N 4 -w 48 -a $allo -e $email -t 04:00:00
+
+
+#################################
+############ MAPPING ############
+#################################
+
+source /work/05410/eabbott/lonestar/myReferences/amilleporaReference.sh
+
+#build mapping commands
+module load bowtie
+>mapse
+for file in *.trim
+do echo "\
+bowtie2 -x $GENOME_PATH -U ${file} --local -p 6 -S ${file/.trim/}.sam">> mapse
+done
+
+#note wayness more than 6 is no good for this
+launcher_creator.py -n mapse -j mapse -q normal -N 12 -w 8 -a $allo -e $email -t 12:00:00
+
+
+#These are fast, but removing duplicates takes a lot of memory
+
+#
+module load samtools
+>removeDups
+for file in *.sam
+do runID=${file/.sam/}
+ echo "samtools sort -O bam -o ${runID}_sorted.bam $file &&\
+ java -Xms4g -jar /work/05410/eabbott/lonestar/picard/MarkDuplicates.jar\
+ INPUT=${runID}_sorted.bam\
+ OUTPUT=${runID}_dupsRemoved.bam\
+ METRICS_FILE=${runID}_dupMetrics.txt\
+ REMOVE_DUPLICATES=true &&\
+ samtools index ${runID}_dupsRemoved.bam" >> removeDups
+ done
+
+launcher_creator.py -n removeDups -j removeDups -t 10:00:00 -q normal -a $allo -e $email -N 48 -w 2
+##run only two per node, assuming 12 sam files, using six nodes allows for all to run simultaneously, expect run to last ~2-4 hours
+
+
+######################################
+############# GET COUNTS #############
+######################################
+
+#choose the genome you're working with
+source /work/05410/eabbott/lonestar/my_reference_genomes/amilleporaReference.sh
+
+
+#run featurecounts
+echo "featureCounts -a $GFF_PATH -p -t gene -g $GENE_ID -o feature_counts_out.tsv -T 48 --primary *_dupsRemoved.bam" > runFeatureCounts
+launcher_creator.py -n runFeatureCounts -j runFeatureCounts -t 01:00:00 -q normal -a $allo -e $email -N 1 -w 2
+
+
+#######################################
+####### PIPELINE COUNTS RESULTS #######
+#######################################
+
+#raw
+wc -l *.fastq |\
+ awk '{split($2, a, ".fastq")
+ print a[1]"\t"$1/4"\trawCounts"}' |\
+ grep -v total > raw_read_counts.tsv &
+
+
+
+
+#trimmed
+wc -l *.trim |\
+ awk '{split($2, a, ".trim")
+ print a[1]"\t"$1/4"\ttrimmedCounts"}' |\
+ grep -v total > trimmed_read_counts.tsv &
+
+
+#get alignment counts before removal
+>getInitialAlignment
+for file in *sorted.bam
+do echo "samtools flagstat $file > ${file/_sorted.bam/}_prededup_flagstats.txt" >> getInitialAlignment
+done
+
+#get post removal alignment counts
+>getDupRemAlignment
+for file in *dupsRemoved.bam
+do echo "samtools flagstat $file > ${file/.bam/}_post_dedup_flagstats.txt" >> getDupRemAlignment
+done
+
+
+
+#format total reads
+>prededup_mapped_count.tsv
+for file in *prededup_flagstats.txt
+do pp=$(grep "mapped" $file | head -n 1)
+ echo -e "$file\t$pp" |\
+ awk '{split($1, a, "_prededup_flagstats.txt")
+ print a[1]"\t"$2"\tpredupMapped"}' >> prededup_mapped_count.tsv
+ done
+
+
+#removal metrics
+>dupRemovalMetrics.tsv
+for file in *dupMetrics.txt
+do pct=$(sed '8q;d' $file | cut -f 8)
+echo -e "$file\t$pct" |\
+ awk '{split($1, a, "_dupMetrics.txt")
+ print a[1]"\t"$2"\tdupRemProp"}' >> dupRemovalMetrics.tsv
+done
+
+
+#format total reads
+>dedup_mapped_count.tsv
+for file in *_post_dedup_flagstats.txt
+do pp=$(grep "mapped" $file | head -n 1)
+ echo -e "$file\t$pp" |\
+ awk '{split($1, a, "_dupsRemoved_post_dedup_flagstats.txt")
+ print a[1]"\t"$2"\tdedupMapped"}' >> dedup_mapped_count.tsv
+ done
+
+
+#COUNTED ON GENES
+total_gene_counts_featureCounts.R feature_counts_out.tsv
+
+
+
+#ASSEMBLE
+cat raw_read_counts.tsv trimmed_read_counts.tsv prededup_mapped_count.tsv dedup_mapped_count.tsv gene_count_sumsFC.tsv > pipelineCounts.tsv
