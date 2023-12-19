@@ -86,14 +86,15 @@ MEs = orderMEs(MEs1[,paste('ME', passing, sep='')])
 # datTraits = datTraits %>%
 #   select(colony,age,treatment,samplingTimepoint,time_day,quant)
 
-datTraits$c1 = ifelse(datTraits$treatment == "control" & datTraits$samplingTimepoint == "1",1,0)
-datTraits$c2 = ifelse(datTraits$treatment == "control" & datTraits$samplingTimepoint == "2",1,0)
+#select samples of interest: each treatment, by timepoint, morning only
+datTraits$c1 = ifelse(datTraits$treatment == "control" & datTraits$time_day == "morning" & datTraits$samplingTimepoint == "1",1,0)
+datTraits$c2 = ifelse(datTraits$treatment == "control" & datTraits$time_day == "morning" & datTraits$samplingTimepoint == "2",1,0)
 
-datTraits$h1 = ifelse(datTraits$treatment == "heat" & datTraits$samplingTimepoint == "1",1,0)
-datTraits$h2 = ifelse(datTraits$treatment == "heat" & datTraits$samplingTimepoint == "2",1,0)
+datTraits$h1 = ifelse(datTraits$treatment == "heat" & datTraits$time_day == "morning" & datTraits$samplingTimepoint == "1",1,0)
+datTraits$h2 = ifelse(datTraits$treatment == "heat" & datTraits$time_day == "morning" & datTraits$samplingTimepoint == "2",1,0)
 
-datTraits$s1 = ifelse(datTraits$treatment == "heatSwitched" & datTraits$samplingTimepoint == "1",1,0)
-datTraits$s2 = ifelse(datTraits$treatment == "heatSwitched" & datTraits$samplingTimepoint == "2",1,0)
+datTraits$s1 = ifelse(datTraits$treatment == "heatSwitched" & datTraits$time_day == "morning" & datTraits$samplingTimepoint == "1",1,0)
+datTraits$s2 = ifelse(datTraits$treatment == "heatSwitched" & datTraits$time_day == "morning" & datTraits$samplingTimepoint == "2",1,0)
 
 datTraits =datTraits %>%
   select(c1,h1,s1,c2,h2,s2)
